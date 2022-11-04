@@ -3,11 +3,13 @@ import tensorflow as tf
 from tensorflow.keras import activations, initializers, regularizers
 from tensorflow.keras.layers import Layer
 
+tf.random.set_seed(1)
+
 
 class Condenser(Layer):
     def __init__(self,
                  n_sample_points=15,
-                 sampling_bounds=(-1, 100),
+                 sampling_bounds=(-10, 100),
                  reducer_dim=None,
                  reducer_trainable=False,
                  theta_trainable=True,
@@ -18,6 +20,7 @@ class Condenser(Layer):
                  bias_regularizer=None,
                  reducer_regularizer=None,
                  attention_activation="leaky_relu",
+                 theta_activation="leaky_relu",
                  residual_activation=None,
                  reducer_activation=None,
                  use_residual=False,
@@ -25,6 +28,7 @@ class Condenser(Layer):
                  scalers_trainable=True,
                  attention_type="fc",
                  characteristic_dropout=0,
+                 temperature_trainable=True,
                  **kwargs):
         super().__init__(**kwargs)
 
@@ -35,13 +39,17 @@ class Condenser(Layer):
         self.theta_trainable = theta_trainable
         self.scalers_trainable = scalers_trainable
         self.characteristic_dropout = characteristic_dropout
+        self.temperature_trainable = temperature_trainable
 
         self.attention_initializer = initializers.get(attention_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
+        self.attention_initializer.seed = 0
+        self.bias_initializer.seed = 0
 
         self.attention_activation = activations.get(attention_activation)
         self.residual_activation = activations.get(residual_activation)
         self.reducer_activation = activations.get(reducer_activation)
+        self.theta_activation = activations.get(theta_activation)
 
         self.attention_regularizer = regularizers.get(attention_regularizer)
         self.theta_regularizer = regularizers.get(theta_regularizer)
@@ -91,10 +99,9 @@ class Condenser(Layer):
         return {'Condenser': Condenser}
 
     def build(self, input_shape):
-        tf.keras.initializers.GlorotNormal(seed=0)
-
         in_dim = input_shape[2]
         self.input_dim = in_dim
+        self.characteristic_dim = 2*self.input_dim*self.n_sample_points
 
         # attention weights
         if self.attention_type == "weighted":
@@ -129,7 +136,8 @@ class Condenser(Layer):
 
         self.att_temperature = self.add_weight(shape=[1],
                                                name="att_temperature",
-                                               initializer="ones")
+                                               initializer="ones",
+                                               trainable=self.temperature_trainable)
 
         # characteristic function sampling points
         self.theta = self.add_weight(
@@ -138,14 +146,15 @@ class Condenser(Layer):
             regularizer=self.theta_regularizer,
             trainable=self.theta_trainable)
 
+        self.bias_theta = self.add_weight(
+            shape=[1, in_dim, 1],
+            name="bias_theta",
+            initializer=self.bias_initializer,
+            regularizer=self.bias_regularizer)
+
         # scalers
         self.scale_theta = self.add_weight(shape=[1],
                                            name="scale_theta",
-                                           initializer="ones",
-                                           trainable=self.scalers_trainable)
-
-        self.scale_input = self.add_weight(shape=[1],
-                                           name="scale_input",
                                            initializer="ones",
                                            trainable=self.scalers_trainable)
 
@@ -156,7 +165,7 @@ class Condenser(Layer):
             self.reducer = self.add_weight(
                 shape=[reducer_in_shape, reducer_dim],
                 name="reducer",
-                initializer=initializers.Orthogonal(),
+                initializer=initializers.Orthogonal(seed=0),
                 regularizer=self.reducer_regularizer,
                 trainable=self.reducer_trainable)
             self.scale_reducer = self.add_weight(
@@ -169,6 +178,11 @@ class Condenser(Layer):
                 name="bias_reducer",
                 initializer=self.bias_initializer,
                 regularizer=self.bias_regularizer)
+            if self.use_residual:
+                self.residual_W = self.add_weight(
+                    shape=[in_dim, reducer_dim],
+                    name="residual_W",
+                    initializer="glorot_normal")
 
     def compute_mask(self, _, mask=None):
         return None
@@ -249,7 +263,7 @@ class Condenser(Layer):
         att_weights = tf.expand_dims(att_weights, -1)
         return att_weights
 
-    def call(self, input, mask=None):
+    def _compute_attention_scores(self, input, mask):
         is_ragged = isinstance(input, tf.RaggedTensor)
         if self.attention_type == "fc":
             if is_ragged:
@@ -263,31 +277,41 @@ class Condenser(Layer):
             else:
                 att_weights = self._compute_weighted_attention_scores(
                     input, mask)
+        return att_weights
+
+    def call(self, input, mask=None):
+
+        # get attention scores / probability distributions
+        att_weights = self._compute_attention_scores(input, mask)
 
         # sample characteristic function
-        theta = self.theta * self.scale_theta
-        phi = (tf.expand_dims(input, axis=-1)) * theta
+        theta = self.theta_activation(
+            self.scale_theta * self.theta + self.bias_theta)
+        phi = tf.expand_dims(input, axis=-1) * theta
         real = tf.reduce_sum(att_weights * tf.cos(phi), axis=1)
         imag = tf.reduce_sum(att_weights * tf.sin(phi), axis=1)
 
         # stack real and imaginary parts
         stack = tf.concat([real, imag], axis=-1)
-        stack = tf.reshape(
-            stack, (-1, 2*self.input_dim*self.n_sample_points))
+        stack = tf.reshape(stack, (-1, self.characteristic_dim))
+
+        # add dropout
         if self.characteristic_dropout > 0:
-            stack = tf.keras.layers.Dropout(.1)(stack)
+            stack = tf.keras.layers.Dropout(self.characteristic_dropout)(stack)
 
         # reducer output dim
         if self.use_reducer:
-            stack = self.reducer_activation(
-                self.scale_reducer * tf.matmul(stack, self.reducer)
-                + self.bias_reducer)
+            stack = tf.matmul(stack, self.reducer)
+            # concatenate characteristic function and input vector
+            if self.use_residual:
+                res = self.residual_activation(
+                    tf.reduce_sum(input * att_weights[:, :, :, 0], axis=1))
+                res = tf.matmul(res, self.residual_W)
+                stack += res
 
-        # concatenate characteristic function and input vector
-        if self.use_residual:
-            res = self.residual_activation(
-                tf.reduce_sum(input * att_weights[:, :, :, 0], axis=1))
-            stack = tf.concat([stack, res], axis=-1)
+            stack = self.reducer_activation(
+                self.scale_reducer * stack + self.bias_reducer)
+
         return stack
 
 
@@ -516,14 +540,18 @@ class WeightedAttention(Layer):
 class SelfAttention(Layer):
     def __init__(
             self,
+            units=None,
+            activation="tanh",
             attention_activation="tanh",
-            attention_width=12,
+            attention_width=24,
             use_positional_encoding=False,
             **kwargs):
 
         super().__init__(**kwargs)
+        self.units = units
         self.attention_activation = tf.keras.activations.get(
             attention_activation)
+        self.activation = tf.keras.activations.get(activation)
         self.attention_width = attention_width
         self.use_positional_encoding = use_positional_encoding
 
@@ -532,6 +560,9 @@ class SelfAttention(Layer):
         dim = input_shape[2]
         self.K = self.add_weight(shape=(dim, dim),
                                  initializer="glorot_normal")
+        if self.units is not None:
+            self.W = self.add_weight(shape=(dim, self.units),
+                                     initializer="glorot_normal")
 
         self.temperature = self.add_weight(shape=(1,),
                                            initializer="ones")
@@ -539,11 +570,9 @@ class SelfAttention(Layer):
         self.bias = self.add_weight(shape=(1,), initializer="zeros")
 
         if self.use_positional_encoding:
-            # self.positional_encoding = positional_encoding(
-            #     input_shape[1], input_shape[2])
             self.positional_encoding = self.add_weight(
                 shape=(input_shape[1], input_shape[2]),
-                initializer="glorot_normal")
+                initializer="glorot_normal", regularizer="l2")
 
     def compute_mask(self, _, mask=None):
         return mask
@@ -594,4 +623,42 @@ class SelfAttention(Layer):
         scores /= tf.reduce_sum(scores, axis=-1, keepdims=True)
 
         combination = tf.matmul(scores, input)
+        if self.units is not None:
+            res = self.activation(tf.matmul(combination, self.W))
+            return res
         return combination
+
+
+class PositionalEmbedding(Layer):
+    def __init__(
+            self,
+            positional_activation="tanh",
+            operation="ADD",
+            **kwargs):
+
+        super().__init__(**kwargs)
+        self.positional_activation = tf.keras.activations.get(
+            positional_activation)
+        self.operation = operation
+
+    def build(self, input_shape):
+        self.positional_encoding = self.add_weight(
+            shape=(input_shape[1], input_shape[2]),
+            initializer="glorot_normal")
+
+    def compute_mask(self, _, mask=None):
+        return mask
+
+    def call(self, input, mask=None):
+        encoding = self.positional_activation(self.positional_encoding)
+        if self.operation == "ADD":
+            res = input + encoding
+        elif self.operation == "MUL":
+            res = input * encoding
+        else:
+            raise ValueError(f"{self.operation} operation not understood")
+
+        if mask is not None:
+            mask = tf.expand_dims(tf.cast(mask, tf.float32), -1)
+            res *= mask
+        return res
