@@ -578,8 +578,8 @@ class SelfAttention(Layer):
 
     def _compute_attention(self, input):
         key = tf.matmul(input, self.K)
-        logits = tf.matmul(key, input, transpose_b=True) + self.bias[0]
-        return self.attention_activation(logits)
+        logits = tf.matmul(key, input, transpose_b=True)
+        return self.attention_activation(self.scale[0] * logits + self.bias[0])
 
     def _compute_ragged_attention(self, input):
         key = tf.ragged.map_flat_values(tf.matmul, input, self.K)
