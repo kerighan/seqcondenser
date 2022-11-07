@@ -6,6 +6,7 @@ from tensorflow.keras.layers import Layer
 tf.random.set_seed(1)
 
 
+@tf.keras.utils.register_keras_serializable()
 class Condenser(Layer):
     def __init__(self,
                  n_sample_points=15,
@@ -13,6 +14,7 @@ class Condenser(Layer):
                  reducer_dim=None,
                  reducer_trainable=False,
                  theta_trainable=True,
+                 temperature_trainable=True,
                  attention_initializer="glorot_uniform",
                  bias_initializer="zeros",
                  attention_regularizer=None,
@@ -28,7 +30,6 @@ class Condenser(Layer):
                  scalers_trainable=True,
                  attention_type="fc",
                  characteristic_dropout=0,
-                 temperature_trainable=True,
                  **kwargs):
         super().__init__(**kwargs)
 
@@ -38,7 +39,6 @@ class Condenser(Layer):
         self.reducer_trainable = reducer_trainable
         self.theta_trainable = theta_trainable
         self.scalers_trainable = scalers_trainable
-        self.characteristic_dropout = characteristic_dropout
         self.temperature_trainable = temperature_trainable
 
         self.attention_initializer = initializers.get(attention_initializer)
@@ -59,6 +59,7 @@ class Condenser(Layer):
         self.use_residual = use_residual
         self.use_reducer = use_reducer
         self.attention_type = attention_type
+        self.characteristic_dropout = characteristic_dropout
 
     def get_config(self):
         config = super().get_config()
@@ -67,7 +68,9 @@ class Condenser(Layer):
             "sampling_bounds": self.sampling_bounds,
             "reducer_dim": self.reducer_dim,
             "reducer_trainable": self.reducer_trainable,
+            "scalers_trainable": self.scalers_trainable,
             "theta_trainable": self.theta_trainable,
+            "temperature_trainable": self.temperature_trainable,
             "attention_initializer": initializers.serialize(
                 self.attention_initializer),
             "bias_initializer": initializers.serialize(self.bias_initializer),
@@ -77,6 +80,8 @@ class Condenser(Layer):
                 self.residual_activation),
             "reducer_activation": activations.serialize(
                 self.reducer_activation),
+            "theta_activation": activations.serialize(
+                self.theta_activation),
             "attention_regularizer": regularizers.serialize(
                 self.attention_regularizer),
             "theta_regularizer": regularizers.serialize(
@@ -86,7 +91,8 @@ class Condenser(Layer):
                 self.reducer_regularizer),
             "use_residual": self.use_residual,
             "use_reducer": self.use_reducer,
-            "attention_type": self.attention_type
+            "attention_type": self.attention_type,
+            "characteristic_dropout": self.characteristic_dropout
         })
         return config
 
@@ -315,6 +321,7 @@ class Condenser(Layer):
         return stack
 
 
+@tf.keras.utils.register_keras_serializable()
 class MultiHeadCondenser(Layer):
     def __init__(self,
                  n_heads=2,
@@ -386,6 +393,7 @@ class MultiHeadCondenser(Layer):
         return tf.concat(results, axis=-1)
 
 
+@tf.keras.utils.register_keras_serializable()
 class WeightedAttention(Layer):
     def __init__(
             self,
@@ -537,62 +545,46 @@ class WeightedAttention(Layer):
         return cls(**config)
 
 
+@tf.keras.utils.register_keras_serializable()
 class SelfAttention(Layer):
     def __init__(
             self,
-            units=None,
             activation="tanh",
             attention_activation="tanh",
             attention_width=24,
-            use_positional_encoding=False,
             **kwargs):
 
         super().__init__(**kwargs)
-        self.units = units
-        self.attention_activation = tf.keras.activations.get(
-            attention_activation)
-        self.activation = tf.keras.activations.get(activation)
+
+        self.attention_activation = activations.get(attention_activation)
+        self.activation = activations.get(activation)
         self.attention_width = attention_width
-        self.use_positional_encoding = use_positional_encoding
 
     def build(self, input_shape):
         self.input_length = input_shape[1]
         dim = input_shape[2]
-        self.K = self.add_weight(shape=(dim, dim),
-                                 initializer="glorot_normal")
-        if self.units is not None:
-            self.W = self.add_weight(shape=(dim, self.units),
-                                     initializer="glorot_normal")
 
-        self.temperature = self.add_weight(shape=(1,),
-                                           initializer="ones")
-
-        self.bias = self.add_weight(shape=(1,), initializer="zeros")
-
-        if self.use_positional_encoding:
-            self.positional_encoding = self.add_weight(
-                shape=(input_shape[1], input_shape[2]),
-                initializer="glorot_normal", regularizer="l2")
+        self.K = self.add_weight(
+            shape=(dim, dim), initializer="glorot_normal", name="K")
+        self.temperature = self.add_weight(
+            shape=(1,), initializer="ones", name="temperature")
+        self.bias = self.add_weight(
+            shape=(1,), initializer="zeros", name="bias")
+        self.scale = self.add_weight(
+            shape=(1,), initializer="ones", name="scale")
 
     def compute_mask(self, _, mask=None):
         return mask
 
     def _compute_attention(self, input):
-        if self.use_positional_encoding:
-            key = tf.matmul(input, self.K) + self.positional_encoding
-            positional_input = input + self.positional_encoding
-            logits = tf.matmul(key, positional_input,
-                               transpose_b=True) + self.bias
-        else:
-            key = tf.matmul(input, self.K)
-            logits = tf.matmul(key, input, transpose_b=True) + self.bias[0]
+        key = tf.matmul(input, self.K)
+        logits = tf.matmul(key, input, transpose_b=True) + self.bias[0]
         return self.attention_activation(logits)
 
     def _compute_ragged_attention(self, input):
         key = tf.ragged.map_flat_values(tf.matmul, input, self.K)
         logits = tf.matmul(key, input, transpose_b=True) + self.bias[0]
-        logits += self.bias[0]
-        return self.attention_activation(logits)
+        return self.attention_activation(self.scale[0] * logits + self.bias[0])
 
     def call(self, input, mask=None):
         is_ragged = isinstance(input, tf.RaggedTensor)
@@ -623,16 +615,32 @@ class SelfAttention(Layer):
         scores /= tf.reduce_sum(scores, axis=-1, keepdims=True)
 
         combination = tf.matmul(scores, input)
-        if self.units is not None:
-            res = self.activation(tf.matmul(combination, self.W))
-            return res
         return combination
 
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "attention_width": self.attention_width,
+            "attention_activation": activations.serialize(
+                self.attention_activation),
+            "activation": activations.serialize(self.activation)
+        })
+        return config
 
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+    @staticmethod
+    def get_custom_objects():
+        return {'SelfAttention': SelfAttention}
+
+
+@tf.keras.utils.register_keras_serializable()
 class PositionalEmbedding(Layer):
     def __init__(
             self,
-            positional_activation="tanh",
+            positional_activation="swish",
             operation="ADD",
             **kwargs):
 
@@ -644,7 +652,8 @@ class PositionalEmbedding(Layer):
     def build(self, input_shape):
         self.positional_encoding = self.add_weight(
             shape=(input_shape[1], input_shape[2]),
-            initializer="glorot_normal")
+            initializer="glorot_normal",
+            name="positional_encoding")
 
     def compute_mask(self, _, mask=None):
         return mask
@@ -662,3 +671,20 @@ class PositionalEmbedding(Layer):
             mask = tf.expand_dims(tf.cast(mask, tf.float32), -1)
             res *= mask
         return res
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "operation": self.operation,
+            "positional_activation": activations.serialize(
+                self.positional_activation)
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+    @staticmethod
+    def get_custom_objects():
+        return {'PositionalEmbedding': PositionalEmbedding}
