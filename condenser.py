@@ -10,7 +10,7 @@ tf.random.set_seed(1)
 class Condenser(Layer):
     def __init__(self,
                  output_dim=None,
-                 n_sample_points=15,
+                 n_sample_points=10,
                  sampling_bounds=(-10, 100),
                  reducer_trainable=False,
                  theta_trainable=True,
@@ -171,7 +171,7 @@ class Condenser(Layer):
         #                                   trainable=self.scalers_trainable)
         self.scale_grad = tf.Variable(np.array([1., 0., -1.]),
                                       dtype=tf.float32)
-        self.characteristic_dim *= 3
+        # self.characteristic_dim *= 3
 
         if self.use_reducer:
             output_dim = (
@@ -222,8 +222,12 @@ class Condenser(Layer):
         imag_d2 = alpha[2] * tf.reduce_sum(-(input_expanded**2)*sin, axis=1)
 
         # stack real and imaginary parts
+        # stack = tf.concat(
+        #     [real, imag, real_d, imag_d, real_d2, imag_d2], axis=-1)
         stack = tf.concat(
-            [real, imag, real_d, imag_d, real_d2, imag_d2], axis=-1)
+            [real + real_d + real_d2, imag + imag_d + imag_d2], axis=-1)
+        # stack = tf.concat(
+        #     [real + imag_d + real_d2, imag + real_d + imag_d2], axis=-1)
         # stack = tf.concat([real, imag, real_d, imag_d], axis=-1)
         # stack = tf.concat([real, imag], axis=-1)
         stack = tf.reshape(stack, (-1, self.characteristic_dim))
@@ -338,78 +342,6 @@ class Condenser(Layer):
                 att_weights = self._compute_weighted_attention_scores(
                     input, mask)
         return att_weights
-
-
-@tf.keras.utils.register_keras_serializable()
-class MultiHeadCondenser(Layer):
-    def __init__(self,
-                 n_heads=2,
-                 hidden_dim=32,
-                 hidden_activation="tanh",
-                 hidden_regularizer="l2",
-                 n_sample_points=15,
-                 sampling_bounds=(-1, 100),
-                 dropout=0,
-                 characteristic_dropout=0,
-                 output_dim=None,
-                 reducer_trainable=False,
-                 theta_trainable=True,
-                 attention_initializer="glorot_uniform",
-                 bias_initializer="zeros",
-                 attention_regularizer=None,
-                 theta_regularizer=None,
-                 bias_regularizer=None,
-                 reducer_regularizer=None,
-                 attention_activation="leaky_relu",
-                 residual_activation=None,
-                 activation=None,
-                 use_residual=False,
-                 use_reducer=True,
-                 scalers_trainable=True,
-                 attention_type="fc",
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.dropout = dropout
-        self.denses = [
-            tf.keras.layers.Dense(
-                hidden_dim,
-                activation=hidden_activation,
-                kernel_regularizer=hidden_regularizer)
-            for _ in range(n_heads)
-        ]
-        self.condensers = [
-            Condenser(
-                n_sample_points=n_sample_points,
-                sampling_bounds=sampling_bounds,
-                output_dim=output_dim,
-                reducer_trainable=reducer_trainable,
-                theta_trainable=theta_trainable,
-                attention_initializer=attention_initializer,
-                bias_initializer=bias_initializer,
-                attention_regularizer=attention_regularizer,
-                theta_regularizer=theta_regularizer,
-                bias_regularizer=bias_regularizer,
-                reducer_regularizer=reducer_regularizer,
-                attention_activation=attention_activation,
-                residual_activation=residual_activation,
-                activation=activation,
-                use_residual=use_residual,
-                use_reducer=use_reducer,
-                scalers_trainable=scalers_trainable,
-                attention_type=attention_type,
-                characteristic_dropout=characteristic_dropout)
-            for _ in range(n_heads)
-        ]
-
-    def call(self, inputs):
-        results = []
-        for i in range(len(self.condensers)):
-            x = self.denses[i](inputs)
-            if self.dropout:
-                x = tf.keras.layers.Dropout(self.dropout)(x)
-            x = self.condensers[i](x)
-            results.append(x)
-        return tf.concat(results, axis=-1)
 
 
 @tf.keras.utils.register_keras_serializable()
