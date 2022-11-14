@@ -148,7 +148,7 @@ class Condenser(Layer):
         # characteristic function sampling points
         self.theta = self.add_weight(
             shape=[1, in_dim, self.n_sample_points], name="theta",
-            initializer=tf.random_uniform_initializer(*self.sampling_bounds),
+            # initializer=tf.random_uniform_initializer(*self.sampling_bounds),
             regularizer=self.theta_regularizer,
             trainable=self.theta_trainable)
         self.theta.assign(
