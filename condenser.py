@@ -22,7 +22,6 @@ class Condenser(Layer):
                  bias_regularizer=None,
                  reducer_regularizer=None,
                  attention_activation="leaky_relu",
-                 theta_activation="leaky_relu",
                  residual_activation=None,
                  activation=None,
                  use_residual=False,
@@ -49,7 +48,6 @@ class Condenser(Layer):
         self.attention_activation = activations.get(attention_activation)
         self.residual_activation = activations.get(residual_activation)
         self.activation = activations.get(activation)
-        self.theta_activation = activations.get(theta_activation)
 
         self.attention_regularizer = regularizers.get(attention_regularizer)
         self.theta_regularizer = regularizers.get(theta_regularizer)
@@ -80,8 +78,6 @@ class Condenser(Layer):
                 self.residual_activation),
             "activation": activations.serialize(
                 self.activation),
-            "theta_activation": activations.serialize(
-                self.theta_activation),
             "attention_regularizer": regularizers.serialize(
                 self.attention_regularizer),
             "theta_regularizer": regularizers.serialize(
@@ -148,7 +144,6 @@ class Condenser(Layer):
         # characteristic function sampling points
         self.theta = self.add_weight(
             shape=[1, in_dim, self.n_sample_points], name="theta",
-            # initializer=tf.random_uniform_initializer(*self.sampling_bounds),
             regularizer=self.theta_regularizer,
             trainable=self.theta_trainable)
         self.theta.assign(
@@ -165,13 +160,9 @@ class Condenser(Layer):
                                            name="scale_theta",
                                            initializer="ones",
                                            trainable=self.scalers_trainable)
-        # self.scale_grad = self.add_weight(shape=[3],
-        #                                   name="scale_grad",
-        #                                   initializer="ones",
-        #                                   trainable=self.scalers_trainable)
-        self.scale_grad = tf.Variable(np.array([1., 0., -1.]),
-                                      dtype=tf.float32)
-        # self.characteristic_dim *= 3
+
+        self.scale_grad = self.add_weight(shape=[3], name="scale_grad")
+        self.scale_grad.assign(np.array([1., 0., -1.]))
 
         if self.use_reducer:
             output_dim = (
@@ -206,28 +197,32 @@ class Condenser(Layer):
         att_weights = self._compute_attention_scores(input, mask)
 
         # sample characteristic function
-        theta = self.theta_activation(
-            self.scale_theta * self.theta + self.bias_theta)
-        input_expanded = tf.expand_dims(input, axis=-1)
-        phi = input_expanded * theta
+        x = tf.expand_dims(input, axis=-1)
+        # theta = self.theta_activation(
+        #     self.scale_theta * self.theta + self.bias_theta)
+        # phi = input_expand * theta
+
+        phi = self.scale_theta * x * self.theta + self.bias_theta
         cos = att_weights * tf.cos(phi)
         sin = att_weights * tf.sin(phi)
 
-        alpha = tf.nn.softmax(self.scale_grad)
-        real = alpha[0] * tf.reduce_sum(cos, axis=1)
-        imag = alpha[0] * tf.reduce_sum(sin, axis=1)
-        real_d = alpha[1] * tf.reduce_sum(-input_expanded*sin, axis=1)
-        imag_d = alpha[1] * tf.reduce_sum(input_expanded*cos, axis=1)
-        real_d2 = alpha[2] * tf.reduce_sum(-(input_expanded**2)*cos, axis=1)
-        imag_d2 = alpha[2] * tf.reduce_sum(-(input_expanded**2)*sin, axis=1)
+        use_derivatives = True
+        if use_derivatives:
+            a = tf.nn.softmax(self.scale_grad)
+            # a = tf.exp(self.scale_grad)
+            # a /= tf.reduce_max(a)
 
+            x_2 = x**2
+            real = tf.reduce_sum(
+                (a[0] - a[2] * x_2) * cos - a[1] * x * sin, axis=1)
+            imag = tf.reduce_sum(
+                (a[0] - a[2] * x_2) * sin + a[1] * x * cos, axis=1)
+            stack = tf.concat([real, imag], axis=-1)
+        else:
+            real = tf.reduce_sum(cos, axis=1)
+            imag = tf.reduce_sum(sin, axis=1)
+            stack = tf.concat([real, imag], axis=-1)
         # stack real and imaginary parts
-        # stack = tf.concat(
-        #     [real, imag, real_d, imag_d, real_d2, imag_d2], axis=-1)
-        stack = tf.concat(
-            [real + real_d + real_d2, imag + imag_d + imag_d2], axis=-1)
-        # stack = tf.concat(
-        #     [real + imag_d + real_d2, imag + real_d + imag_d2], axis=-1)
         # stack = tf.concat([real, imag, real_d, imag_d], axis=-1)
         # stack = tf.concat([real, imag], axis=-1)
         stack = tf.reshape(stack, (-1, self.characteristic_dim))
@@ -248,7 +243,10 @@ class Condenser(Layer):
 
             stack = self.activation(
                 self.scale_reducer * stack + self.bias_reducer)
-
+            # if self.use_residual:
+            #     residual = tf.reduce_sum(
+            #         input * att_weights[:, :, :, 0], axis=1)
+            #     stack = tf.concat([stack, residual], axis=-1)
         return stack
 
     def _compute_fc_attention_scores(self, input, mask):
@@ -499,8 +497,8 @@ class WeightedAttention(Layer):
 class SelfAttention(Layer):
     def __init__(
             self,
-            activation="tanh",
-            attention_activation="tanh",
+            activation=None,
+            attention_activation="relu",
             attention_width=24,
             **kwargs):
 
@@ -515,13 +513,20 @@ class SelfAttention(Layer):
         dim = input_shape[2]
 
         self.K = self.add_weight(
-            shape=(dim, dim), initializer="glorot_normal", name="K")
+            shape=(dim, dim),
+            initializer="glorot_normal",
+            name="K",
+            dtype=np.float32)
         self.temperature = self.add_weight(
-            shape=(1,), initializer="ones", name="temperature")
+            shape=(1,),
+            initializer="ones",
+            name="temperature",
+            dtype=np.float32)
         self.bias = self.add_weight(
-            shape=(1,), initializer="zeros", name="bias")
-        # self.scale = self.add_weight(
-        #     shape=(1,), initializer="ones", name="scale", trainable=False)
+            shape=(1,),
+            initializer="zeros",
+            name="bias",
+            dtype=np.float32)
 
     def compute_mask(self, _, mask=None):
         return mask
@@ -533,8 +538,8 @@ class SelfAttention(Layer):
 
     def _compute_ragged_attention(self, input):
         key = tf.ragged.map_flat_values(tf.matmul, input, self.K)
-        logits = tf.matmul(key, input, transpose_b=True) + self.bias[0]
-        return self.attention_activation(logits + self.bias[0])
+        logits = tf.matmul(key, input, transpose_b=True)
+        return logits
 
     def call(self, input, mask=None):
         is_ragged = isinstance(input, tf.RaggedTensor)
@@ -565,7 +570,8 @@ class SelfAttention(Layer):
         scores /= tf.reduce_sum(scores, axis=-1, keepdims=True)
 
         combination = tf.matmul(scores, input)
-        return combination
+        print(combination)
+        return self.activation(combination)
 
     def get_config(self):
         config = super().get_config()
