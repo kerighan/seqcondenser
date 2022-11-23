@@ -570,7 +570,6 @@ class SelfAttention(Layer):
         scores /= tf.reduce_sum(scores, axis=-1, keepdims=True)
 
         combination = tf.matmul(scores, input)
-        print(combination)
         return self.activation(combination)
 
     def get_config(self):
