@@ -198,10 +198,6 @@ class Condenser(Layer):
 
         # sample characteristic function
         x = tf.expand_dims(input, axis=-1)
-        # theta = self.theta_activation(
-        #     self.scale_theta * self.theta + self.bias_theta)
-        # phi = input_expand * theta
-
         phi = self.scale_theta * x * self.theta + self.bias_theta
         cos = att_weights * tf.cos(phi)
         sin = att_weights * tf.sin(phi)
@@ -209,8 +205,6 @@ class Condenser(Layer):
         use_derivatives = True
         if use_derivatives:
             a = tf.nn.softmax(self.scale_grad)
-            # a = tf.exp(self.scale_grad)
-            # a /= tf.reduce_max(a)
 
             x_2 = x**2
             real = tf.reduce_sum(
@@ -222,9 +216,6 @@ class Condenser(Layer):
             real = tf.reduce_sum(cos, axis=1)
             imag = tf.reduce_sum(sin, axis=1)
             stack = tf.concat([real, imag], axis=-1)
-        # stack real and imaginary parts
-        # stack = tf.concat([real, imag, real_d, imag_d], axis=-1)
-        # stack = tf.concat([real, imag], axis=-1)
         stack = tf.reshape(stack, (-1, self.characteristic_dim))
 
         # add dropout
@@ -243,10 +234,6 @@ class Condenser(Layer):
 
             stack = self.activation(
                 self.scale_reducer * stack + self.bias_reducer)
-            # if self.use_residual:
-            #     residual = tf.reduce_sum(
-            #         input * att_weights[:, :, :, 0], axis=1)
-            #     stack = tf.concat([stack, residual], axis=-1)
         return stack
 
     def _compute_fc_attention_scores(self, input, mask):
