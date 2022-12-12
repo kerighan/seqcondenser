@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='keras-condenser',
-    version='0.0.1',
+    version='0.0.2',
     description='Seq2Vec layer on Tensorflow by summarizing feature distribution with characteristic function.',
     py_modules=['condenser'],
     install_requires=['tensorflow'],
