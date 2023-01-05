@@ -29,6 +29,7 @@ class Condenser(Layer):
                  scalers_trainable=True,
                  attention_type="fc",
                  characteristic_dropout=0,
+                 use_derivatives=True,
                  **kwargs):
         super().__init__(**kwargs)
 
@@ -59,6 +60,8 @@ class Condenser(Layer):
         self.attention_type = attention_type
         self.characteristic_dropout = characteristic_dropout
 
+        self.use_derivatives = use_derivatives
+
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -88,7 +91,8 @@ class Condenser(Layer):
             "use_residual": self.use_residual,
             "use_reducer": self.use_reducer,
             "attention_type": self.attention_type,
-            "characteristic_dropout": self.characteristic_dropout
+            "characteristic_dropout": self.characteristic_dropout,
+            "use_derivatives": self.use_derivatives
         })
         return config
 
@@ -161,8 +165,10 @@ class Condenser(Layer):
                                            initializer="ones",
                                            trainable=self.scalers_trainable)
 
-        self.scale_grad = self.add_weight(shape=[3], name="scale_grad")
-        self.scale_grad.assign(np.array([1., 0., -1.]))
+        if self.use_derivatives:
+            self.scale_grad = self.add_weight(shape=[3], name="scale_grad")
+            # self.scale_grad.assign(np.array([1., 0., -1.]))
+            self.scale_grad.assign(np.array([1., 0.01, 0.01]))
 
         if self.use_reducer:
             output_dim = (
@@ -202,9 +208,9 @@ class Condenser(Layer):
         cos = att_weights * tf.cos(phi)
         sin = att_weights * tf.sin(phi)
 
-        use_derivatives = True
-        if use_derivatives:
-            a = tf.nn.softmax(self.scale_grad)
+        if self.use_derivatives:
+            # a = tf.nn.softmax(self.scale_grad)
+            a = self.scale_grad
 
             x_2 = x**2
             real = tf.reduce_sum(
