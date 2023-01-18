@@ -5,7 +5,6 @@ setup(
     version='0.0.3',
     description='Seq2Vec layer on Tensorflow by summarizing feature distribution with characteristic function.',
     py_modules=['condenser'],
-    install_requires=['tensorflow'],
     classifiers=[
         'Intended Audience :: Developers',
         'License :: OSI Approved :: Apache Software License',
