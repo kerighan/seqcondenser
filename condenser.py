@@ -4,6 +4,7 @@ from tensorflow.keras import activations, initializers, regularizers
 from tensorflow.keras.layers import Layer
 
 tf.random.set_seed(1)
+EPS = 1e-6
 
 
 @tf.keras.utils.register_keras_serializable()
@@ -493,13 +494,15 @@ class SelfAttention(Layer):
             activation=None,
             attention_activation="relu",
             attention_width=24,
-            **kwargs):
+            mask_future=False,
+            ** kwargs):
 
         super().__init__(**kwargs)
 
         self.attention_activation = activations.get(attention_activation)
         self.activation = activations.get(activation)
         self.attention_width = attention_width
+        self.mask_future = mask_future
 
     def build(self, input_shape):
         self.input_length = input_shape[1]
@@ -520,6 +523,11 @@ class SelfAttention(Layer):
             initializer="zeros",
             name="bias",
             dtype=np.float32)
+        if self.mask_future:
+            self._mask = tf.constant(
+                np.triu(-np.inf*np.ones(
+                    (self.input_length, self.input_length)), 2),
+                dtype=tf.float32)
 
     def compute_mask(self, _, mask=None):
         return mask
@@ -554,13 +562,17 @@ class SelfAttention(Layer):
                 logits -= 10000.0 * (
                     (1.0 - mask) * (1.0 - tf.keras.backend.permute_dimensions(
                         mask, (0, 2, 1))))
+
         else:
             logits = self._compute_ragged_attention(input)
 
         logits *= self.temperature
-        logits_max = tf.reduce_max(logits, keepdims=True, axis=-1)
-        scores = tf.exp(logits - logits_max)
-        scores /= tf.reduce_sum(scores, axis=-1, keepdims=True)
+        logits -= tf.reduce_max(logits, keepdims=True, axis=-1)
+        if self.mask_future:
+            logits += self._mask
+        scores = tf.exp(logits)
+        scores /= tf.clip_by_value(
+            tf.reduce_sum(scores, axis=-1, keepdims=True), EPS, float("inf"))
 
         combination = tf.matmul(scores, input)
         return self.activation(combination)
