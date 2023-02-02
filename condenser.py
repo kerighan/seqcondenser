@@ -168,8 +168,8 @@ class Condenser(Layer):
 
         if self.use_derivatives:
             self.scale_grad = self.add_weight(shape=[3], name="scale_grad")
-            # self.scale_grad.assign(np.array([1., 0., -1.]))
-            self.scale_grad.assign(np.array([1., 0.01, 0.01]))
+            self.scale_grad.assign(np.array([1., 0., -1.]))
+            # self.scale_grad.assign(np.array([1., 0.01, 0.01]))
 
         if self.use_reducer:
             output_dim = (
@@ -210,8 +210,8 @@ class Condenser(Layer):
         sin = att_weights * tf.sin(phi)
 
         if self.use_derivatives:
-            # a = tf.nn.softmax(self.scale_grad)
-            a = self.scale_grad
+            a = tf.nn.softmax(self.scale_grad)
+            # a = self.scale_grad
 
             x_2 = x**2
             real = tf.reduce_sum(
